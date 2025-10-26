@@ -57,7 +57,7 @@ prep_iso_env() {
   timedatectl set-ntp true
   loadkeys "$KEYMAP" || true
   sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf
-  sed -i 's/^ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf
+  sed -i 's/^ParallelDownloads.*/ParallelDownloads = 20/' /etc/pacman.conf
 }
 
 partition_disk() {
@@ -166,6 +166,16 @@ grub-mkconfig -o /boot/grub/grub.cfg
 
 log "Enable NetworkManager"
 systemctl enable NetworkManager
+
+log "Enable TTY1 autologin for ${USERNAME}"
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<EOC
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/agetty --autologin ${USERNAME} --noclear %I \$TERM
+Type=idle
+EOC
+systemctl daemon-reload
 
 efibootmgr -v || true
 log "Done"
