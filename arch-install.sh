@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Arch Linux UEFI + LUKS installer (no arrow keys, step-by-step prompts)
-# Usage:
-#   curl -fsSL https://your-url/arch-encrypt.sh | bash
-# or save then: bash arch-encrypt.sh
-
+# Arch Linux UEFI + LUKS installer (plain prompts, fast, robust)
+# Run from Arch ISO: curl -fsSL https://example.com/arch-encrypt.sh | bash
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -11,16 +8,10 @@ LOG=/tmp/arch-install.log
 exec > >(tee -a "$LOG") 2>&1
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-run() { echo "==> $*"; eval "$*"; }
-pause() { read -rp "Press Enter to continue..."; }
+say() { echo -e "\n==> $*"; }
 
-require_uefi() {
-  [ -d /sys/firmware/efi/efivars ] || die "Not booted in UEFI mode."
-}
-
-require_net() {
-  ping -c1 -W3 archlinux.org >/dev/null 2>&1 || die "No internet. Use iwctl, then rerun."
-}
+require_uefi() { [ -d /sys/firmware/efi/efivars ] || die "Boot the ISO in UEFI mode."; }
+require_net() { ping -c1 -W3 archlinux.org >/dev/null 2>&1 || die "No internet. Use iwctl, then rerun."; }
 
 choose_disk() {
   echo
@@ -31,8 +22,8 @@ choose_disk() {
   echo
   read -rp "Install to which number? " n
   [[ "$n" =~ ^[0-9]+$ ]] || die "Invalid selection."
-  idx=$((n-1))
-  [ "$idx" -ge 0 ] && [ "$idx" -lt "${#L[@]}" || die "Out of range." ]
+  local idx=$((n-1))
+  if ! (( idx >= 0 && idx < ${#L[@]} )); then die "Out of range."; fi
   DISK=$(echo "${L[$idx]}" | awk '{print $1}')
   echo "Selected disk: $DISK"
 }
@@ -44,7 +35,7 @@ confirm_wipe() {
   [ "$yn" = "YES" ] || die "Cancelled."
 }
 
-defaults() {
+collect_inputs() {
   KEYMAP="us"
   LOCALE="${LOCALE:-en_US.UTF-8}"
   read -rp "Hostname [archlinux]: " HOSTNAME; HOSTNAME=${HOSTNAME:-archlinux}
@@ -59,7 +50,7 @@ defaults() {
   read -rsp "Confirm encryption password: " CRYPTPASS2; echo
   [ "$CRYPTPASS" = "$CRYPTPASS2" ] || die "Encryption passwords do not match."
   read -rp "Timezone (Region/City) [UTC]: " TIMEZONE; TIMEZONE=${TIMEZONE:-UTC}
-  echo "Locale will be ${LOCALE}. Keyboard will be ${KEYMAP}."
+  echo "Locale: ${LOCALE} | Keyboard: ${KEYMAP}"
 }
 
 prep_iso_env() {
@@ -70,7 +61,7 @@ prep_iso_env() {
 }
 
 partition_disk() {
-  echo "Partitioning $DISK to GPT: 512M EFI + rest LUKS."
+  say "Partitioning $DISK (GPT: 512M EFI + rest root)"
   if [[ "$DISK" =~ nvme|mmcblk ]]; then
     BOOT_PART="${DISK}p1"
     ROOT_PART="${DISK}p2"
@@ -78,33 +69,37 @@ partition_disk() {
     BOOT_PART="${DISK}1"
     ROOT_PART="${DISK}2"
   fi
-  run "wipefs -af $DISK"
-  run "sgdisk -Z $DISK"
-  run "sgdisk -n 1:0:+512M -t 1:ef00 -c 1:'EFI' $DISK"
-  run "sgdisk -n 2:0:0    -t 2:8309 -c 2:'LUKS' $DISK"
-  run "partprobe $DISK"
+  wipefs -af "$DISK"
+  sgdisk -Z "$DISK"
+  sgdisk -n 1:0:+512M -t 1:ef00 -c 1:'EFI' "$DISK"
+  sgdisk -n 2:0:0      -t 2:8300 -c 2:'ROOT' "$DISK"   # 8300 = Linux filesystem (safe, universal)
+  partprobe "$DISK"
   sleep 2
   lsblk "$DISK"
 }
 
 format_encrypt_mount() {
-  run "mkfs.fat -F32 $BOOT_PART"
-  echo -n "$CRYPTPASS" | cryptsetup luksFormat --type luks2 "$ROOT_PART" - </dev/tty
-  echo -n "$CRYPTPASS" | cryptsetup open "$ROOT_PART" cryptroot - </dev/tty
-  run "mkfs.ext4 -F /dev/mapper/cryptroot"
-  run "mount /dev/mapper/cryptroot /mnt"
-  run "mkdir -p /mnt/boot"
-  run "mount $BOOT_PART /mnt/boot"
+  say "Formatting EFI"
+  mkfs.fat -F32 "$BOOT_PART"
+  say "Encrypting root (LUKS2)"
+  printf '%s' "$CRYPTPASS" | cryptsetup --batch-mode luksFormat --type luks2 "$ROOT_PART" -
+  printf '%s' "$CRYPTPASS" | cryptsetup open "$ROOT_PART" cryptroot -
+  say "Formatting root (ext4)"
+  mkfs.ext4 -F /dev/mapper/cryptroot
+  say "Mounting"
+  mount /dev/mapper/cryptroot /mnt
+  mkdir -p /mnt/boot
+  mount "$BOOT_PART" /mnt/boot
 }
 
 install_base() {
-  CPU_VENDOR=$(grep -m1 -i '^vendor_id' /proc/cpuinfo | awk '{print $3}' || true)
+  CPU_VENDOR=$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo | xargs || true)
   MC=""
   [[ "$CPU_VENDOR" == "GenuineIntel" ]] && MC="intel-ucode"
   [[ "$CPU_VENDOR" == "AuthenticAMD" ]] && MC="amd-ucode"
-  echo "Detected CPU: $CPU_VENDOR ${MC:+(adding $MC)}"
-  run "pacstrap -K /mnt base base-devel linux linux-firmware $MC networkmanager grub efibootmgr cryptsetup lvm2 sudo nano vim"
-  run "genfstab -U /mnt > /mnt/etc/fstab"
+  say "Installing base system ${MC:+(+ $MC)}"
+  pacstrap -K /mnt base base-devel linux linux-firmware ${MC} networkmanager grub efibootmgr cryptsetup sudo nano vim
+  genfstab -U /mnt > /mnt/etc/fstab
 }
 
 write_chroot_script() {
@@ -127,7 +122,11 @@ ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
 hwclock --systohc
 
 log "Locale"
-sed -i "s/^#\(${LOCALE//\//\\/}\s\+UTF-8\)/\1/" /etc/locale.gen || echo "${LOCALE} UTF-8" >> /etc/locale.gen
+if ! grep -q "^${LOCALE} UTF-8" /etc/locale.gen; then
+  sed -i "s/^#${LOCALE} UTF-8/${LOCALE} UTF-8/" /etc/locale.gen || echo "${LOCALE} UTF-8" >> /etc/locale.gen
+else
+  sed -i "s/^#${LOCALE} UTF-8/${LOCALE} UTF-8/" /etc/locale.gen
+fi
 locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
 
@@ -142,37 +141,33 @@ cat > /etc/hosts <<EOF
 127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
 EOF
 
-log "Passwords"
+log "Users"
 echo "root:${ROOTPASS}" | chpasswd
 useradd -m -G wheel -s /bin/bash "${USERNAME}"
 echo "${USERNAME}:${USERPASS}" | chpasswd
-
-log "Sudo"
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
-log "mkinitcpio hooks for LUKS"
+log "mkinitcpio hooks (encrypt)"
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-log "GRUB kernel cmdline with cryptdevice"
+log "Kernel cmdline for LUKS"
 CRYPT_UUID=$(blkid -s UUID -o value "${ROOT_PART}")
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=${CRYPT_UUID}:cryptroot root=/dev/mapper/cryptroot\"|" /etc/default/grub
 
 log "Install GRUB to NVRAM"
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ArchLinux --recheck
 
-log "Also install fallback EFI (removable path)"
+log "Install GRUB fallback (removable path)"
 grub-install --target=x86_64-efi --efi-directory=/boot --removable
 
 log "Generate GRUB config"
 grub-mkconfig -o /boot/grub/grub.cfg
 
-log "Enable services"
+log "Enable NetworkManager"
 systemctl enable NetworkManager
 
-log "Show EFI entries (if available)"
 efibootmgr -v || true
-
 log "Done"
 EOS
 
@@ -188,24 +183,23 @@ EOS
 }
 
 run_chroot() {
-  run "arch-chroot /mnt /root/configure.sh"
-  run "rm -f /mnt/root/configure.sh"
+  arch-chroot /mnt /root/configure.sh
+  rm -f /mnt/root/configure.sh
 }
 
 verify_boot() {
+  echo
   echo "Boot files:"
   ls -l /mnt/boot || true
   ls -l /mnt/boot/EFI || true
   [ -f /mnt/boot/grub/grub.cfg ] || die "Missing /boot/grub/grub.cfg"
-  # Fallback path should exist after --removable
-  [ -f /mnt/boot/EFI/BOOT/BOOTX64.EFI ] || echo "Note: fallback BOOTX64.EFI not found; check firmware NVRAM entry."
+  [ -f /mnt/boot/EFI/BOOT/BOOTX64.EFI ] || echo "Note: fallback BOOTX64.EFI not found; check firmware NVRAM entries."
 }
 
 finish() {
   echo
-  echo "Install finished. Log: $LOG"
-  echo "Unmount and reboot now."
-  echo "Commands:"
+  echo "Done. Log: $LOG"
+  echo "Now run:"
   echo "  umount -R /mnt"
   echo "  cryptsetup close cryptroot"
   echo "  reboot"
@@ -216,7 +210,7 @@ main() {
   require_net
   choose_disk
   confirm_wipe
-  defaults
+  collect_inputs
   prep_iso_env
   partition_disk
   format_encrypt_mount
