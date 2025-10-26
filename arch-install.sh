@@ -156,7 +156,7 @@ CRYPT_UUID=$(blkid -s UUID -o value "${ROOT_PART}")
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=${CRYPT_UUID}:cryptroot root=/dev/mapper/cryptroot\"|" /etc/default/grub
 
 log "Install GRUB to NVRAM"
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ArchLinux --recheck
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=LINUX --recheck
 
 log "Install GRUB fallback (removable path)"
 grub-install --target=x86_64-efi --efi-directory=/boot --removable
