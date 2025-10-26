@@ -1,9 +1,24 @@
 #!/bin/bash
 
-# Arch Linux Encrypted Installation - Interactive TUI
+# Arch Linux Encrypted Installation - Interactive TUI (Fixed)
 # Usage: curl -sL <url> | bash
 
 set -e
+
+# Logging
+LOGFILE="/tmp/arch-install.log"
+exec > >(tee -a "$LOGFILE")
+exec 2>&1
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"
+}
+
+error_exit() {
+    echo "ERROR: $1" | tee -a "$LOGFILE"
+    dialog --title "Installation Failed" --msgbox "\nInstallation failed!\n\nError: $1\n\nCheck the log at: $LOGFILE" 10 60
+    exit 1
+}
 
 # Check if dialog is available, if not install it
 if ! command -v dialog &> /dev/null; then
@@ -60,6 +75,8 @@ EOF
 # Variables
 declare -A CONFIG
 
+log "=== Arch Linux Encrypted Installation Started ==="
+
 # Welcome screen
 dialog --title "Arch Linux Encrypted Installation" \
     --colors --msgbox "\n\Zb\Z4Welcome to the Arch Linux Encrypted Installer!\Zn\n\n\
@@ -72,9 +89,9 @@ Press \Zb\Z1OK\Zn to continue..." 16 $WIDTH
 
 # Check UEFI mode
 if [ ! -d /sys/firmware/efi/efivars ]; then
-    dialog --title "Error" --msgbox "This script requires UEFI mode.\n\nPlease boot in UEFI mode." 8 $WIDTH
-    exit 1
+    error_exit "System not booted in UEFI mode"
 fi
+log "UEFI mode confirmed"
 
 # Internet check
 dialog --infobox "Checking internet connection..." 4 40
@@ -88,13 +105,12 @@ For WiFi, exit and use:\n\n\
 Then run this script again." 14 $WIDTH
     exit 1
 fi
+log "Internet connection verified"
 
 # Keyboard layout - default to US
 CONFIG[KEYMAP]="us"
 loadkeys ${CONFIG[KEYMAP]}
-
-dialog --infobox "Keyboard layout set to: US" 4 40
-sleep 1
+log "Keyboard layout set to: ${CONFIG[KEYMAP]}"
 
 # Disk selection
 DISKS=$(lsblk -d -n -p -o NAME,SIZE,TYPE | grep disk)
@@ -111,6 +127,7 @@ dialog --title "Disk Selection" \
     "${DISK_OPTIONS[@]}" 2> $TEMP_FILE
 
 CONFIG[DISK]=$(cat $TEMP_FILE)
+log "Selected disk: ${CONFIG[DISK]}"
 
 # Confirm disk
 dialog --title "⚠️  CONFIRMATION REQUIRED" \
@@ -120,6 +137,7 @@ This action cannot be undone.\n\n\
 Do you want to continue?" 11 $WIDTH
 
 if [ $? -ne 0 ]; then
+    log "Installation cancelled by user"
     dialog --msgbox "Installation cancelled." 6 40
     exit 0
 fi
@@ -137,6 +155,7 @@ dialog --title "Timezone - Region" \
     "${REGION_OPTIONS[@]}" 2> $TEMP_FILE
 
 CONFIG[REGION]=$(cat $TEMP_FILE)
+log "Selected region: ${CONFIG[REGION]}"
 
 # Timezone - City
 CITIES=$(ls /usr/share/zoneinfo/${CONFIG[REGION]}/ | sort)
@@ -152,6 +171,7 @@ dialog --title "Timezone - City" \
 
 CONFIG[CITY]=$(cat $TEMP_FILE)
 CONFIG[TIMEZONE]="${CONFIG[REGION]}/${CONFIG[CITY]}"
+log "Timezone set to: ${CONFIG[TIMEZONE]}"
 
 # Locale selection
 LOCALES=("en_US.UTF-8" "English (US)"
@@ -171,6 +191,7 @@ dialog --title "Locale" \
     "${LOCALES[@]}" 2> $TEMP_FILE
 
 CONFIG[LOCALE]=$(cat $TEMP_FILE)
+log "Locale set to: ${CONFIG[LOCALE]}"
 
 # Hostname
 dialog --title "Hostname" \
@@ -178,6 +199,7 @@ dialog --title "Hostname" \
     10 $WIDTH "archlinux" 2> $TEMP_FILE
 
 CONFIG[HOSTNAME]=$(cat $TEMP_FILE)
+log "Hostname: ${CONFIG[HOSTNAME]}"
 
 # Username
 dialog --title "User Account" \
@@ -185,6 +207,7 @@ dialog --title "User Account" \
     10 $WIDTH "" 2> $TEMP_FILE
 
 CONFIG[USERNAME]=$(cat $TEMP_FILE)
+log "Username: ${CONFIG[USERNAME]}"
 
 # User password
 while true; do
@@ -205,6 +228,7 @@ while true; do
         dialog --msgbox "Passwords don't match. Try again." 6 40
     fi
 done
+log "User password set"
 
 # Root password
 while true; do
@@ -225,6 +249,7 @@ while true; do
         dialog --msgbox "Passwords don't match. Try again." 6 40
     fi
 done
+log "Root password set"
 
 # Encryption password
 while true; do
@@ -248,6 +273,7 @@ Enter encryption password:" \
         dialog --msgbox "Passwords don't match. Try again." 6 40
     fi
 done
+log "Encryption password set"
 
 # Summary and final confirmation
 dialog --title "Installation Summary" \
@@ -262,16 +288,38 @@ Please review your configuration:\n\n\
 \Zb\Z1Start installation?\Zn" 17 $WIDTH
 
 if [ $? -ne 0 ]; then
+    log "Installation cancelled by user at summary"
     dialog --msgbox "Installation cancelled." 6 40
     exit 0
 fi
 
+log "User confirmed installation, starting..."
+
+# Create a named pipe for progress
+PROGRESS_PIPE=$(mktemp -u)
+mkfifo $PROGRESS_PIPE
+trap "rm -f $PROGRESS_PIPE" EXIT
+
+# Start dialog gauge in background
+dialog --title "Installing Arch Linux" --gauge "Preparing..." 10 $WIDTH 0 < $PROGRESS_PIPE &
+DIALOG_PID=$!
+
+# Function to update progress
+update_progress() {
+    local percent=$1
+    local message=$2
+    echo "$percent"
+    echo "# $message"
+    log "$message"
+} > $PROGRESS_PIPE
+
 # Installation begins
-(
-    echo "0" ; echo "# Updating system clock..." ; sleep 1
-    timedatectl set-ntp true
+{
+    update_progress 0 "Updating system clock..."
+    timedatectl set-ntp true || error_exit "Failed to set NTP"
     
-    echo "5" ; echo "# Partitioning disk..." ; sleep 1
+    update_progress 5 "Partitioning disk..."
+    
     # Determine partition naming
     if [[ ${CONFIG[DISK]} == *"nvme"* ]] || [[ ${CONFIG[DISK]} == *"mmcblk"* ]]; then
         BOOT_PART="${CONFIG[DISK]}p1"
@@ -281,91 +329,143 @@ fi
         ROOT_PART="${CONFIG[DISK]}2"
     fi
     
-    wipefs -af ${CONFIG[DISK]} 2>&1 | grep -v "^$"
-    sgdisk -Z ${CONFIG[DISK]} 2>&1 | grep -v "^$"
-    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI" ${CONFIG[DISK]} 2>&1 | grep -v "^$"
-    sgdisk -n 2:0:0 -t 2:8309 -c 2:"LUKS" ${CONFIG[DISK]} 2>&1 | grep -v "^$"
-    partprobe ${CONFIG[DISK]}
-    sleep 2
+    log "Boot partition: $BOOT_PART"
+    log "Root partition: $ROOT_PART"
     
-    echo "15" ; echo "# Formatting boot partition..." ; sleep 1
-    mkfs.fat -F32 $BOOT_PART 2>&1 | grep -v "^$"
+    wipefs -af ${CONFIG[DISK]} || error_exit "Failed to wipe disk"
+    sgdisk -Z ${CONFIG[DISK]} || error_exit "Failed to zap disk"
+    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI" ${CONFIG[DISK]} || error_exit "Failed to create boot partition"
+    sgdisk -n 2:0:0 -t 2:8309 -c 2:"LUKS" ${CONFIG[DISK]} || error_exit "Failed to create root partition"
+    partprobe ${CONFIG[DISK]} || error_exit "Failed to probe partitions"
+    sleep 3
     
-    echo "20" ; echo "# Setting up encryption (this may take a moment)..." ; sleep 1
-    echo -n "${CONFIG[CRYPT_PASSWORD]}" | cryptsetup luksFormat --type luks2 $ROOT_PART - 2>&1 | grep -v "^$"
-    echo -n "${CONFIG[CRYPT_PASSWORD]}" | cryptsetup open $ROOT_PART cryptroot - 2>&1 | grep -v "^$"
+    update_progress 15 "Formatting boot partition..."
+    mkfs.fat -F32 $BOOT_PART || error_exit "Failed to format boot partition"
     
-    echo "30" ; echo "# Formatting root partition..." ; sleep 1
-    mkfs.ext4 /dev/mapper/cryptroot 2>&1 | grep -v "^$"
+    update_progress 20 "Setting up encryption (this may take a moment)..."
+    echo -n "${CONFIG[CRYPT_PASSWORD]}" | cryptsetup luksFormat --type luks2 $ROOT_PART - || error_exit "Failed to encrypt partition"
+    echo -n "${CONFIG[CRYPT_PASSWORD]}" | cryptsetup open $ROOT_PART cryptroot - || error_exit "Failed to open encrypted partition"
     
-    echo "35" ; echo "# Mounting partitions..." ; sleep 1
-    mount /dev/mapper/cryptroot /mnt
+    update_progress 30 "Formatting root partition..."
+    mkfs.ext4 -F /dev/mapper/cryptroot || error_exit "Failed to format root partition"
+    
+    update_progress 35 "Mounting partitions..."
+    mount /dev/mapper/cryptroot /mnt || error_exit "Failed to mount root"
     mkdir -p /mnt/boot
-    mount $BOOT_PART /mnt/boot
+    mount $BOOT_PART /mnt/boot || error_exit "Failed to mount boot"
     
-    echo "40" ; echo "# Configuring pacman..." ; sleep 1
+    update_progress 40 "Configuring pacman..."
     sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf
     sed -i 's/^ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf
     
-    echo "45" ; echo "# Installing base system (this will take several minutes)..." ; sleep 1
-    pacstrap /mnt base base-devel linux linux-firmware networkmanager nano vim grub efibootmgr cryptsetup lvm2 git curl wget 2>&1 | \
-        stdbuf -oL tr '\r' '\n' | grep -E "installing|upgrading" | tail -1
+    update_progress 45 "Installing base system (5-15 minutes depending on connection)..."
+    pacstrap /mnt base base-devel linux linux-firmware networkmanager nano vim grub efibootmgr cryptsetup lvm2 git curl wget || error_exit "Failed to install base system"
     
-    echo "70" ; echo "# Generating fstab..." ; sleep 1
-    genfstab -U /mnt >> /mnt/etc/fstab
+    update_progress 70 "Generating fstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab || error_exit "Failed to generate fstab"
     
-    echo "75" ; echo "# Configuring system..." ; sleep 1
+    update_progress 75 "Configuring system..."
     
-    cat << CHROOT_EOF > /mnt/root/configure.sh
+    cat << 'CHROOT_EOF' > /mnt/root/configure.sh
 #!/bin/bash
 set -e
 
-ln -sf /usr/share/zoneinfo/${CONFIG[TIMEZONE]} /etc/localtime
-hwclock --systohc
+log() {
+    echo "[CONFIG] $*"
+}
 
-echo "${CONFIG[LOCALE]} UTF-8" >> /etc/locale.gen
-locale-gen
-echo "LANG=${CONFIG[LOCALE]}" > /etc/locale.conf
+error_exit() {
+    echo "[ERROR] $*"
+    exit 1
+}
 
-echo "KEYMAP=${CONFIG[KEYMAP]}" > /etc/vconsole.conf
+log "Setting timezone..."
+ln -sf /usr/share/zoneinfo/TIMEZONE_PLACEHOLDER /etc/localtime || error_exit "Failed to set timezone"
+hwclock --systohc || error_exit "Failed to sync hardware clock"
 
-echo "${CONFIG[HOSTNAME]}" > /etc/hostname
-cat > /etc/hosts << HOSTS_EOF
+log "Generating locale..."
+echo "LOCALE_PLACEHOLDER UTF-8" >> /etc/locale.gen
+locale-gen || error_exit "Failed to generate locale"
+echo "LANG=LOCALE_PLACEHOLDER" > /etc/locale.conf
+
+log "Setting keyboard layout..."
+echo "KEYMAP=KEYMAP_PLACEHOLDER" > /etc/vconsole.conf
+
+log "Setting hostname..."
+echo "HOSTNAME_PLACEHOLDER" > /etc/hostname
+cat > /etc/hosts << 'HOSTS_EOF'
 127.0.0.1   localhost
 ::1         localhost
-127.0.1.1   ${CONFIG[HOSTNAME]}.localdomain ${CONFIG[HOSTNAME]}
+127.0.1.1   HOSTNAME_PLACEHOLDER.localdomain HOSTNAME_PLACEHOLDER
 HOSTS_EOF
 
-echo "root:${CONFIG[ROOT_PASSWORD]}" | chpasswd
+log "Setting root password..."
+echo "root:ROOT_PASSWORD_PLACEHOLDER" | chpasswd || error_exit "Failed to set root password"
 
-useradd -m -G wheel -s /bin/bash ${CONFIG[USERNAME]}
-echo "${CONFIG[USERNAME]}:${CONFIG[USER_PASSWORD]}" | chpasswd
+log "Creating user..."
+useradd -m -G wheel -s /bin/bash USERNAME_PLACEHOLDER || error_exit "Failed to create user"
+echo "USERNAME_PLACEHOLDER:USER_PASSWORD_PLACEHOLDER" | chpasswd || error_exit "Failed to set user password"
 
+log "Configuring sudo..."
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 
+log "Configuring mkinitcpio for encryption..."
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
-mkinitcpio -P >/dev/null 2>&1
+mkinitcpio -P || error_exit "Failed to generate initramfs"
 
-CRYPT_UUID=\$(blkid -s UUID -o value $ROOT_PART)
-sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=\${CRYPT_UUID}:cryptroot root=/dev/mapper/cryptroot\"|" /etc/default/grub
+log "Getting UUID for encrypted partition..."
+CRYPT_UUID=$(blkid -s UUID -o value ROOT_PART_PLACEHOLDER)
+log "Encrypted partition UUID: $CRYPT_UUID"
 
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB >/dev/null 2>&1
-grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1
+log "Configuring GRUB..."
+sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet cryptdevice=UUID=${CRYPT_UUID}:cryptroot root=/dev/mapper/cryptroot\"|" /etc/default/grub
 
-systemctl enable NetworkManager >/dev/null 2>&1
+log "Installing GRUB to EFI..."
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ArchLinux --recheck || error_exit "Failed to install GRUB"
 
-echo "done"
+log "Generating GRUB config..."
+grub-mkconfig -o /boot/grub/grub.cfg || error_exit "Failed to generate GRUB config"
+
+log "Enabling NetworkManager..."
+systemctl enable NetworkManager || error_exit "Failed to enable NetworkManager"
+
+log "Configuration complete!"
 CHROOT_EOF
     
+    # Replace placeholders
+    sed -i "s|TIMEZONE_PLACEHOLDER|${CONFIG[TIMEZONE]}|g" /mnt/root/configure.sh
+    sed -i "s|LOCALE_PLACEHOLDER|${CONFIG[LOCALE]}|g" /mnt/root/configure.sh
+    sed -i "s|KEYMAP_PLACEHOLDER|${CONFIG[KEYMAP]}|g" /mnt/root/configure.sh
+    sed -i "s|HOSTNAME_PLACEHOLDER|${CONFIG[HOSTNAME]}|g" /mnt/root/configure.sh
+    sed -i "s|ROOT_PASSWORD_PLACEHOLDER|${CONFIG[ROOT_PASSWORD]}|g" /mnt/root/configure.sh
+    sed -i "s|USERNAME_PLACEHOLDER|${CONFIG[USERNAME]}|g" /mnt/root/configure.sh
+    sed -i "s|USER_PASSWORD_PLACEHOLDER|${CONFIG[USER_PASSWORD]}|g" /mnt/root/configure.sh
+    sed -i "s|ROOT_PART_PLACEHOLDER|$ROOT_PART|g" /mnt/root/configure.sh
+    
     chmod +x /mnt/root/configure.sh
-    arch-chroot /mnt /root/configure.sh
+    
+    update_progress 80 "Running system configuration in chroot..."
+    arch-chroot /mnt /root/configure.sh || error_exit "Failed to configure system"
     rm /mnt/root/configure.sh
     
-    echo "95" ; echo "# Cleaning up..." ; sleep 1
+    update_progress 95 "Verifying installation..."
     
-    echo "100" ; echo "# Installation complete!" ; sleep 1
+    # Verify critical files exist
+    [ -f /mnt/boot/grub/grub.cfg ] || error_exit "GRUB config not found"
+    [ -d /mnt/boot/EFI ] || error_exit "EFI directory not found"
+    [ -f /mnt/etc/fstab ] || error_exit "fstab not found"
     
-) | dialog --title "Installing Arch Linux" --gauge "Preparing..." 10 $WIDTH 0
+    log "Boot files verification:"
+    ls -la /mnt/boot/
+    ls -la /mnt/boot/EFI/ || true
+    
+    update_progress 100 "Installation complete!"
+    sleep 2
+    
+} 2>&1 | tee -a "$LOGFILE"
+
+# Wait for dialog to finish
+wait $DIALOG_PID
 
 # Success screen
 dialog --title "🎉 Installation Complete!" \
@@ -380,9 +480,13 @@ Your system is now ready.\n\n\
 \Zb\Z4System Info:\Zn\n\
   Hostname: ${CONFIG[HOSTNAME]}\n\
   Username: ${CONFIG[USERNAME]}\n\
-  Encryption: LUKS2\n\n\
-Press OK to reboot now." 20 $WIDTH
+  Encryption: LUKS2\n\
+  Log: $LOGFILE\n\n\
+Press OK to reboot now." 22 $WIDTH
+
+log "=== Installation completed successfully ==="
 
 # Cleanup and reboot
 umount -R /mnt
+cryptsetup close cryptroot
 reboot
