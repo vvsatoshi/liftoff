@@ -89,22 +89,11 @@ Then run this script again." 14 $WIDTH
     exit 1
 fi
 
-# Keyboard layout
-KEYMAP_LIST=$(localectl list-keymaps | head -50)
-KEYMAP_OPTIONS=()
-for km in $KEYMAP_LIST; do
-    KEYMAP_OPTIONS+=("$km" "")
-done
-
-dialog --title "Keyboard Layout" \
-    --menu "Select your keyboard layout:" \
-    $HEIGHT $WIDTH $CHOICE_HEIGHT \
-    "${KEYMAP_OPTIONS[@]}" 2> $TEMP_FILE
-
-CONFIG[KEYMAP]=$(cat $TEMP_FILE)
+# Keyboard layout - default to US
+CONFIG[KEYMAP]="us"
 loadkeys ${CONFIG[KEYMAP]}
 
-dialog --infobox "Keyboard layout set to: ${CONFIG[KEYMAP]}" 4 50
+dialog --infobox "Keyboard layout set to: US" 4 40
 sleep 1
 
 # Disk selection
